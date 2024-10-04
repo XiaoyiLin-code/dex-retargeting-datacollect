@@ -1,3 +1,4 @@
+import json
 import tempfile
 from pathlib import Path
 from typing import Dict, List
@@ -18,7 +19,7 @@ from dex_retargeting.constants import (
 )
 from dex_retargeting.retargeting_config import RetargetingConfig
 from dex_retargeting.seq_retarget import SeqRetargeting
-
+from scipy.spatial.transform import Rotation as R
 
 class RobotHandDatasetSAPIENViewer(HandDatasetSAPIENViewer):
     def __init__(self, robot_names: List[RobotName], hand_type: HandType, headless=False, use_ray_tracing=False):
@@ -31,6 +32,12 @@ class RobotHandDatasetSAPIENViewer(HandDatasetSAPIENViewer):
         self.retarget2sapien: List[np.ndarray] = []
         self.hand_type = hand_type
 
+        # Data collection
+        self.traj_data = []              # Joint position trajectory
+        self.robot_pose_data = []        # Robot poses
+        self.object_pose_data = []       # Object poses
+        self.obj_name = "037_scissors"   # Object name
+        self.load_traj_data()
         # Load optimizer and filter
         loader = self.scene.create_urdf_loader()
         loader.fix_root_link = True
@@ -59,8 +66,22 @@ class RobotHandDatasetSAPIENViewer(HandDatasetSAPIENViewer):
             robot = loader.load(temp_path)
             self.robots.append(robot)
             sapien_joint_names = [joint.name for joint in robot.get_active_joints()]
+            print(sapien_joint_names)
+            self.joint_names = sapien_joint_names
             retarget2sapien = np.array([retargeting.joint_names.index(n) for n in sapien_joint_names]).astype(int)
             self.retarget2sapien.append(retarget2sapien)
+
+
+    def load_traj_data(self):
+        import json
+
+        with open(
+            "/home/lightcone/ZJU_remote/legged_lab/data/csv/robot_data.json"
+        ) as f:
+            data = json.load(f)
+            joint_pos = np.array(data["traj"])
+            root_pos = np.array(data["pose"])
+            self.target_jt_seq = joint_pos
 
     def load_object_hand(self, data: Dict):
         super().load_object_hand(data)
@@ -74,6 +95,7 @@ class RobotHandDatasetSAPIENViewer(HandDatasetSAPIENViewer):
                 self._load_ycb_object(ycb_id, ycb_mesh_file)
 
     def render_dexycb_data(self, data: Dict, fps=5, y_offset=0.8):
+
         # Set table and viewer pose for better visual effect only
         global_y_offset = -y_offset * len(self.robots) / 2
         self.table.set_pose(sapien.Pose([0.5, global_y_offset + 0.2, 0]))
@@ -131,7 +153,7 @@ class RobotHandDatasetSAPIENViewer(HandDatasetSAPIENViewer):
 
         # Loop rendering
         step_per_frame = int(60 / fps)
-        for i in trange(start_frame, num_frame):
+        for i, pos in zip(trange(start_frame, num_frame), self.target_jt_seq):
             object_pose_frame = object_pose[i]
             hand_pose_frame = hand_pose[i]
             vertex, joint = self._compute_hand_geometry(hand_pose_frame)
@@ -141,7 +163,10 @@ class RobotHandDatasetSAPIENViewer(HandDatasetSAPIENViewer):
                 pos_quat = object_pose_frame[k]
 
                 # Quaternion convention: xyzw -> wxyz
-                pose = self.camera_pose * sapien.Pose(pos_quat[4:], np.concatenate([pos_quat[3:4], pos_quat[:3]]))
+                pose = self.camera_pose * sapien.Pose(
+                    pos_quat[4:], 
+                    np.concatenate([pos_quat[3:4], pos_quat[:3]])
+                )
                 self.objects[k].set_pose(pose)
                 for copy_ind in range(num_copy):
                     self.objects[k + copy_ind * num_ycb_objects].set_pose(pose_offsets[copy_ind] * pose)
@@ -154,9 +179,52 @@ class RobotHandDatasetSAPIENViewer(HandDatasetSAPIENViewer):
                 indices = retargeting.optimizer.target_link_human_indices
                 ref_value = joint[indices, :]
                 qpos = retargeting.retarget(ref_value)[retarget2sapien]
+                # qpos = pos.astype(np.float32)
+                # print(pos)
+                # i = list(range(6, len(qpos)))
+                # qposcopy = qpos[i].copy()
+                # qpos = qpos * 0
+                # qpos[i] = qposcopy
                 robot.set_qpos(qpos)
 
             self.scene.update_render()
+
+            for robot in self.robots:
+                qpos = robot.get_qpos()
+                self.traj_data.append(qpos[6:].tolist())
+                position = robot.find_link_by_name("forearm")  
+                p = position.get_pose()
+                trans = p.get_p()
+                rotation = p.get_q()
+                pose_combined = np.concatenate([trans, rotation])
+                self.robot_pose_data.append(pose_combined.tolist())
+              
+
+
+            found_count = 0 
+
+            for k in range(num_ycb_objects):
+                for obj in self.objects:
+                    if "037" in obj.get_name():
+                        found_count += 1  # Each time a target object is found, increment the counter
+                        
+                        # Check if it's the second object
+                        if found_count == 2:
+                            obj_pos = obj.get_pose()  # Get object's position and orientation
+                            obj_xyz = obj_pos.get_p()  # Get XYZ coordinates
+                            obj_rotation = obj_pos.get_q()  # Get rotation (quaternion)
+
+                            obj_pose_combined = np.concatenate([obj_xyz, obj_rotation])
+                            print(obj_xyz, obj_rotation, obj_pose_combined)
+
+                            self.object_pose_data.append(obj_pose_combined.tolist())
+                            break
+                if found_count == 2:
+                    break
+
+                
+
+            # Handle rendering (video or display)
             if self.headless:
                 self.camera.take_picture()
                 rgb = self.camera.get_picture("Color")[..., :3]
@@ -166,8 +234,27 @@ class RobotHandDatasetSAPIENViewer(HandDatasetSAPIENViewer):
                 for _ in range(step_per_frame):
                     self.viewer.render()
 
+        # After rendering, save data
+        self.save_data_to_json()
+
         if not self.headless:
             self.viewer.paused = True
             self.viewer.render()
         else:
             writer.release()
+
+    def save_data_to_json(self, output_file: str = "robot_data.json"):
+        data_to_save = {
+            "joint_names": self.joint_names,
+            "traj": self.traj_data,
+            "pose": self.robot_pose_data,
+            "obj_pose": self.object_pose_data,
+            "obj_name": self.obj_name
+        }
+
+        try:
+            with open(output_file, "w") as f:
+                json.dump(data_to_save, f, indent=4)
+            print(f"Data has been successfully saved as {output_file}")
+        except IOError as e:
+            print(f"Error saving file: {e}")
