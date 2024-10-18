@@ -36,8 +36,9 @@ class RobotHandDatasetSAPIENViewer(HandDatasetSAPIENViewer):
         self.traj_data = []              # Joint position trajectory
         self.robot_pose_data = []        # Robot poses
         self.object_pose_data = []       # Object poses
+        self.joint_pose_data = []
         self.obj_name = "037_scissors"   # Object name
-        self.load_traj_data()
+        # self.load_traj_data()
         # Load optimizer and filter
         loader = self.scene.create_urdf_loader()
         loader.fix_root_link = True
@@ -67,7 +68,8 @@ class RobotHandDatasetSAPIENViewer(HandDatasetSAPIENViewer):
             self.robots.append(robot)
             sapien_joint_names = [joint.name for joint in robot.get_active_joints()]
             print(sapien_joint_names)
-            self.joint_names = sapien_joint_names
+            self.joint_names = sapien_joint_names[6:]
+            self.body_names = [link.name for link in robot.get_links()[7:]]
             retarget2sapien = np.array([retargeting.joint_names.index(n) for n in sapien_joint_names]).astype(int)
             self.retarget2sapien.append(retarget2sapien)
 
@@ -76,7 +78,7 @@ class RobotHandDatasetSAPIENViewer(HandDatasetSAPIENViewer):
         import json
 
         with open(
-            "/home/lightcone/ZJU_remote/legged_lab/data/csv/robot_data.json"
+            "traj/robot_data.json"
         ) as f:
             data = json.load(f)
             joint_pos = np.array(data["traj"])
@@ -153,7 +155,7 @@ class RobotHandDatasetSAPIENViewer(HandDatasetSAPIENViewer):
 
         # Loop rendering
         step_per_frame = int(60 / fps)
-        for i, pos in zip(trange(start_frame, num_frame), self.target_jt_seq):
+        for i, pos in zip(trange(start_frame, num_frame), hand_pose):
             object_pose_frame = object_pose[i]
             hand_pose_frame = hand_pose[i]
             vertex, joint = self._compute_hand_geometry(hand_pose_frame)
@@ -191,6 +193,9 @@ class RobotHandDatasetSAPIENViewer(HandDatasetSAPIENViewer):
 
             for robot in self.robots:
                 qpos = robot.get_qpos()
+                joint_poses = [joint.get_pose() for joint in robot.get_links()[7:]]
+                pose_array = [np.concatenate([p.get_p(), p.get_q()]) for p in joint_poses]
+                self.joint_pose_data.append(np.stack(pose_array).tolist())
                 self.traj_data.append(qpos[6:].tolist())
                 position = robot.find_link_by_name("forearm")  
                 p = position.get_pose()
@@ -198,8 +203,6 @@ class RobotHandDatasetSAPIENViewer(HandDatasetSAPIENViewer):
                 rotation = p.get_q()
                 pose_combined = np.concatenate([trans, rotation])
                 self.robot_pose_data.append(pose_combined.tolist())
-              
-
 
             found_count = 0 
 
@@ -221,8 +224,6 @@ class RobotHandDatasetSAPIENViewer(HandDatasetSAPIENViewer):
                             break
                 if found_count == 2:
                     break
-
-                
 
             # Handle rendering (video or display)
             if self.headless:
@@ -246,7 +247,9 @@ class RobotHandDatasetSAPIENViewer(HandDatasetSAPIENViewer):
     def save_data_to_json(self, output_file: str = "robot_data.json"):
         data_to_save = {
             "joint_names": self.joint_names,
+            "body_names": self.body_names,
             "traj": self.traj_data,
+            "body_pose": self.joint_pose_data,
             "pose": self.robot_pose_data,
             "obj_pose": self.object_pose_data,
             "obj_name": self.obj_name
